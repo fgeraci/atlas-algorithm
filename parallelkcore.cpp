@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <limits.h>
 #include <omp.h>
+#include <unordered_map>
+#include <vector>
 #define DEBUG 1
 
 // A struct to represent an edge in the edge list
@@ -29,7 +31,19 @@ struct graph {
     unsigned int *start_indices;
     unsigned int *end_indices;
     edge *edgeList;
+	std::vector<std::vector<unsigned int>> adjList;
 }g;
+
+// DEFINITIONS
+void buildAdjacencyList();
+	// Given a set of labeled edges, find all virtual connected-components in an adjacency list
+void extractComponents(unsigned int* edgeLabels, std::unordered_map<unsigned int,std::vector<unsigned int>> &components);
+	// Recursively traverses an adjacency list
+void dfsComponent(unsigned int src,std::vector<unsigned int> &nodes,bool *visited, unsigned int *edgeLabels);
+	// Determines if a given edge has been already labeled
+bool isEdgeLabeled(unsigned int src, unsigned int tgt, unsigned int *edgeLabels);
+	// Prints a map of vectors which represented connected components
+void printComponents(std::unordered_map<unsigned int,std::vector<unsigned int>> &components);
 
 // Utility function to print a given array
 template <class T>
@@ -38,6 +52,31 @@ void printArray(T *arr, unsigned int n) {
         std::cout<<arr[i]<<" ";
     }
     std::cout<<"\n";
+}
+
+void printEdgeLabels(unsigned int *edgeLabels) {
+    std::cout<<"[ ";
+    for(int i = 0; i < g.EDGENUM; i++) {
+	std::cout<<"("<<(g.edgeList+i)->src<<","<<(g.edgeList+i)->tgt<<"): ";
+        if(i + 1 == g.EDGENUM)
+	    std::cout<<(int)edgeLabels[i]<<" ";
+	else
+	    std::cout<<(int)edgeLabels[i]<<", ";
+    }
+    std::cout<<" ]\n";
+}
+
+void printComponents(std::unordered_map<unsigned int,std::vector<unsigned int>> &components) {
+	std::cout<<"NUMBER OF COMPONENTS: "<<components.size()<<"\n";
+	for(std::unordered_map<unsigned int,std::vector<unsigned int>>::iterator it = components.begin();
+					it != components.end(); it++) {
+		std::cout<<"["<<it->first<<"] -> "; 
+		std::vector<unsigned int> v = (std::vector<unsigned int>) it->second;
+		for(unsigned int n = 0; n < v.size(); n++) {
+			std::cout<<v[n]<<" ";
+		}
+		std::cout<<";\n";
+	}
 }
 
 long long currentTimeMilliS = 0;
@@ -67,6 +106,7 @@ void createMemoryMap(char *fileName) {
     struct stat sizeResults;
     assert(stat(fileName, &sizeResults) == 0);
     fileSizeInByte = sizeResults.st_size;
+    // map edge list into memory    
     g.edgeList = (edge *)mmap(NULL, fileSizeInByte, PROT_READ | PROT_WRITE, MAP_SHARED, binFile, 0);
     close(binFile);
 }
@@ -89,6 +129,7 @@ void createInMemoryEdgeList(char *fileName) {
         is.close();
 }
 
+// Reads and input file, removes self-loops, creates a new file with an undirected graph (src->tgt | tgt->src)
 void doubleAndReverseGraph(char *inputFile, char *outputFile) {
     std::ifstream is;
     is.open(inputFile, std::ios::in | std::ios::binary);
@@ -97,10 +138,12 @@ void doubleAndReverseGraph(char *inputFile, char *outputFile) {
     unsigned int src, tgt;
     unsigned int updatedEdgeNum = g.EDGENUM;
     for(unsigned int i = 0; i < g.EDGENUM; i++) {
-        is.read((char *)(&src), sizeof(unsigned int));
+        // read the source -> target value and arrange bytes
+	is.read((char *)(&src), sizeof(unsigned int));
         is.read((char *)(&tgt), sizeof(unsigned int));
         src = htonl(src);
         tgt = htonl(tgt);
+	// check values are positive
         assert(src >= 0 && src <= g.NODENUM);
         assert(tgt >= 0 && tgt <= g.NODENUM);
         // Removes self loops
@@ -109,9 +152,11 @@ void doubleAndReverseGraph(char *inputFile, char *outputFile) {
             os.write((char *)&tgt, sizeof(unsigned int));
         }
         else {
+	    // discard edge if it is a self loop
             updatedEdgeNum--;
         }
     }
+    // reset pointer position in file
     is.seekg(0, std::ios::beg);
     for(unsigned int i = 0; i < g.EDGENUM; i++) {
         is.read((char *)(&src), sizeof(unsigned int));
@@ -128,7 +173,7 @@ void doubleAndReverseGraph(char *inputFile, char *outputFile) {
     }
     g.EDGENUM = updatedEdgeNum;
     g.EDGENUM *= 2;
-    is.close();
+	is.close();
     os.close();
 }
 
@@ -214,6 +259,73 @@ void findDegree(unsigned int *edgeLabels, float *degree) {
     for(unsigned int i = 0; i < g.NODENUM + 1; i++) {
         degree[i] /= 2;
     }
+}
+
+// Given a list of labeled edgess, it identifies disjoint components
+void extractComponents(unsigned int *edgeLabels, std::unordered_map<unsigned int,std::vector<unsigned int>> &components) {
+	// std::unordered_map<unsigned int,std::vector<unsigned int>> components;
+	bool *visited = new bool[g.adjList.size()];
+	std::fill_n(visited,g.adjList.size(),false);
+	for(unsigned int i = 0; i < g.EDGENUM; ++i) {
+		// only pick root nodes from labels which hasn't been labeled
+		if(edgeLabels[i] == -1) {
+			edge* e = (g.edgeList+i);
+			int currSrc = e->src;
+			if(!visited[currSrc]) {
+				components[currSrc] = std::vector<unsigned int>(0);
+				dfsComponent(currSrc,components[currSrc],visited,edgeLabels);
+			}
+		}
+	}
+	if(DEBUG)
+		printComponents(components);
+	delete [] visited;
+}
+
+void dfsComponent(unsigned int src, std::vector<unsigned int> &nodes,bool *visited, unsigned int *edgeLabels) {
+	visited[src] = true;
+	for(unsigned int i =0; i < g.adjList[src].size(); ++i) {
+		unsigned int currChild = g.adjList[src][i];
+		if(!(visited[currChild] || isEdgeLabeled(src,currChild,edgeLabels))) {
+			nodes.push_back(currChild);
+			dfsComponent(currChild,nodes,visited,edgeLabels);
+		}
+	}
+}
+
+bool isEdgeLabeled(unsigned int src, unsigned int tgt, unsigned int *edgeLabels) {
+	for(unsigned int i = 0; i < g.EDGENUM; ++i){
+		edge *e = (g.edgeList+i);
+		if(e->src > src) break;
+		if(e->src == src && e->tgt == tgt) {
+			return (edgeLabels[i] != -1);
+		}
+	}
+	return false;
+}
+
+// Builds an adjacency list representation, only once
+void buildAdjacencyList() {	
+	for(unsigned int n = 0; n < g.NODENUM+1; n++) {
+		g.adjList.push_back(std::vector<unsigned int>(0));
+	}
+	for(unsigned int i = 0; i < g.EDGENUM; ++i) {
+		unsigned int src = (g.edgeList+i)->src;
+		unsigned int tgt = (g.edgeList+i)->tgt;
+		g.adjList[src].push_back(tgt);
+	}
+	if(DEBUG) {
+		std::cout<<"ADJANCECY LIST: \n";
+		for(unsigned int n = 0; n < g.NODENUM + 1;n++) {
+			if(g.adjList[n].size() > 0) {
+				std::cout<<"HEAD: "<<n<<": [ ";
+				for(unsigned int a = 0; a < g.adjList[n].size(); ++a) {
+						std::cout<<g.adjList[n][a]<<" ";
+				}
+				std::cout<<" ]\n";
+			}
+		}
+	}
 }
 
 void scan(unsigned int *deg, unsigned int level, unsigned int* curr, long *currTailPtr) {
@@ -413,11 +525,12 @@ void writeMetaData(unsigned int NODENUM, unsigned int EDGENUM, long long preproc
 }
 
 int main(int argc, char *argv[]) {
-    char *tmpFile = "tmp.bin";
+    char *tmpFile = (char*) "tmp.bin";
     remove(tmpFile);
     g.EDGENUM = atoi(argv[2]);
     g.NODENUM = atoi(argv[3]);
-    reset();
+	std::unordered_map<unsigned int,std::vector<unsigned int>> components;
+	reset();
     doubleAndReverseGraph(argv[1], tmpFile);
     if(DEBUG)
         std::cout<<"DOUBLED AND REVERSED GRAPH\n";
@@ -425,10 +538,12 @@ int main(int argc, char *argv[]) {
     unsigned int *edgeLabels = new unsigned int[g.EDGENUM];
     std::fill_n(edgeLabels, g.EDGENUM, -1);
     createMemoryMap(tmpFile);
-    if(DEBUG)
+	if(DEBUG)
         std::cout<<"CREATED MEMORY MAP\n";
     formatGraph(originalIndices);
-    long long preprocessingTime = getTimeElapsed();
+    buildAdjacencyList();
+	extractComponents(edgeLabels,components); // TODO - remove, test only
+	long long preprocessingTime = getTimeElapsed();
     reset();
     if(DEBUG)
         std::cout<<"FORMATTED GRAPH\n";
@@ -440,10 +555,14 @@ int main(int argc, char *argv[]) {
     unsigned int *core = new unsigned int[g.NODENUM + 1];
     while(!isGraphEmpty(edgeLabels)) {
         std::copy(degree, degree + g.NODENUM + 1, core);
+		if(DEBUG) { 
+			std::cout<<"CURRENT NODES DEGREES: ";
+			printArray(degree,g.NODENUM+1);
+		}    
         parKCore(core, edgeLabels);
         unsigned int mc = *std::max_element(core, core + g.NODENUM + 1);
         if(DEBUG)
-            std::cout<<"CURRENT MAXIMUM CORE : "<<mc<<"\n";
+ 			std::cout<<"CURRENT MAXIMUM CORE : "<<mc<<"\n";
         bool *isFinalNode = new bool[g.NODENUM + 1];
         std::fill_n(isFinalNode, g.NODENUM + 1, false);
         for(unsigned int i = 0; i <= g.NODENUM; i++) {
@@ -452,6 +571,14 @@ int main(int argc, char *argv[]) {
             }
         }
         labelEdgesAndUpdateDegree(mc, isFinalNode, degree, edgeLabels);
+		if(DEBUG) {
+			std::cout<<"CURRENT EDGES CORE VALUES: ";
+			printArray(core, g.NODENUM+1);
+			std::cout<<"CURRENT EDGE LABELS: ";
+			printEdgeLabels(edgeLabels);
+			components.clear();
+			extractComponents(edgeLabels,components);
+		}
         delete [] isFinalNode;
     }
     g.EDGENUM /= 2;
